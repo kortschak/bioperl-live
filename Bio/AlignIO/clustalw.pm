@@ -201,11 +201,13 @@ sub next_aln {
             $str =~ s/[^A-Za-z]//g;
             $end = length($str);
         }
-        my $seq = Bio::LocatableSeq->new(
-            -seq   => $alignments{$name},
-            -id    => $sname,
-            -start => $start,
-            -end   => $end
+        my $seq = Bio::LocatableSeq->new
+	    (
+	     '-seq'         => $alignments{$name},
+	     '-display_id'  => $sname,
+	     '-start'       => $start,
+	     '-end'         => $end,
+	    '-alphabet'     => $self->alphabet,
         );
         $aln->add_seq($seq);
     }
@@ -245,7 +247,7 @@ sub write_aln {
             $aln->set_displayname_flat(1);
         }
         $self->_print(
-            sprintf( "CLUSTAL W(%s) multiple sequence alignment\n\n\n",
+            sprintf( "CLUSTAL W (%s) multiple sequence alignment\n\n\n",
                 $CLUSTALPRINTVERSION )
         ) or return;
         $length = $aln->length();

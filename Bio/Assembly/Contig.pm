@@ -221,7 +221,7 @@ package Bio::Assembly::Contig;
 use strict;
 
 use Bio::SeqFeature::Collection;
-use Bio::Seq::PrimaryQual;
+use Bio::Seq::PrimaryQual; # isa Bio::Seq::QualI
 
 use Scalar::Util qw(weaken);
 
@@ -723,7 +723,7 @@ sub change_coord {
  Function  : Get "gapped consensus" location for aligned sequence
  Returns   : Bio::SeqFeature::Generic for coordinates or undef.
              A warning is printed if sequence coordinates were not set.
- Argument  : Bio::LocatabaleSeq object
+ Argument  : Bio::LocatableSeq object
 
 =cut
 
@@ -769,7 +769,7 @@ sub get_seq_coord {
              Note: the original feature primary tag will
                    be lost.
 
-             $seq   : a Bio::LocatabaleSeq object
+             $seq   : a Bio::LocatableSeq object
 
 =cut
 
@@ -852,11 +852,10 @@ sub set_consensus_sequence {
 =cut
 
 sub set_consensus_quality {
-    my $self = shift;
-    my $qual  = shift;
+    my ($self, $qual) = @_;
 
-    $self->throw("Consensus quality must be a Bio::Seq::Quality object!")
-        unless ( $qual->isa("Bio::Seq::Quality") );
+    $self->throw("Consensus quality must be a Bio::Seq::QualI object!")
+        unless ( $qual->isa("Bio::Seq::QualI") );
 
     $self->throw("Consensus quality can't be added before you set the consensus sequence!")
         unless (defined $self->{'_consensus_sequence'});
@@ -903,7 +902,7 @@ sub get_consensus_sequence {
  Usage     : $contig->get_consensus_quality()
  Function  : Get a reference to the consensus quality object
              for this contig.
- Returns   : A Bio::QualI object
+ Returns   : A Bio::Seq::QualI object
  Argument  : none
 
 =cut
@@ -951,9 +950,9 @@ sub set_seq_qual {
     my $previous = 0;
     my $next     = 0;
     my $i = 0; my $j = 0;
-    while ($i<=$#{$tmp}) {
+    while ($i <= $#{$tmp}) {
         # IF base is a gap, quality is the average for neighbouring sites
-        if (substr($sequence,$j,1) eq '-') {
+        if ($j > $i && substr($sequence,$j,1) eq '-') {
             $previous = $tmp->[$i-1] unless ($i == 0);
             if ($i < $#{$tmp}) {
                 $next = $tmp->[$i+1];
@@ -1139,9 +1138,13 @@ sub add_seq {
     # Our locatable sequences are always considered to be complete sequences
     $seq->start(1);
     $seq->end($seq->_ungapped_len);
-
+    
+    my $alphabet = $seq->alphabet;
+    
+    $alphabet = lc($alphabet) if defined $alphabet;
+    
     $self->warn("Adding non-nucleotidic sequence ".$seqID)
-        if (lc($seq->alphabet) ne 'dna' && lc($seq->alphabet) ne 'rna');
+        if (!$alphabet || ($alphabet ne 'dna' && $alphabet ne 'rna'));
 
     # build the symbol list for this sequence,
     # will prune out the gap and missing/match chars
@@ -1407,7 +1410,7 @@ sub select {
 
              Creates a new alignment from a subset of
              sequences.  Numbering starts from 1.  Sequence positions
-             larger than num_sequences() will thow an error.
+             larger than num_sequences() will throw an error.
 
  Returns   : a Bio::Assembly::Contig object
  Args      : array of integers for the sequences
@@ -1726,7 +1729,7 @@ sub length {
     $self->throw_not_implemented();
 }
 
-=head2 maxdname_length
+=head2 maxname_length
 
  Title     : maxname_length
  Usage     : $contig->maxname_length()

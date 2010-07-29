@@ -613,7 +613,7 @@ sub _next_term {
           if (
             (
                 $line !~
-/^(\[|id:|name:|is_a:|relationship:|namespace:|is_obsolete:|alt_id:|def:|xref_analog:|exact_synonym:|broad_synonym:|related_synonym:|synonym:|comment:)/
+/^(\[|id:|name:|is_a:|relationship:|namespace:|is_obsolete:|alt_id:|def:|xref_analog:|exact_synonym:|broad_synonym:|related_synonym:|synonym:|comment:|xref:)/
             )
             || $skip_stanza_flag
           );
@@ -662,12 +662,15 @@ sub _next_term {
                 $term->add_dbxref(-dbxrefs => $ann);
             }
             elsif ( $tag =~ /(\w*)synonym/i ) {
-                $val =~ s/['"\[\]]//g;
+                #$val =~ s/['"\[\]]//g; #NML commented out b/c need quotes
                 $term->add_synonym($val);
             }
             elsif ( $tag eq "ALT_ID" ) {
                 $term->add_secondary_id($val);
             }
+	    elsif ( $tag =~ /XREF/i ) {
+		$term->add_secondary_id($val);
+	    }
             elsif ( $tag eq "IS_OBSOLETE" ) {
 
                 if ( $val eq 'true' ) {

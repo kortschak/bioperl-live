@@ -209,6 +209,8 @@ BEGIN {
 
         'BlastOutput_program'             => 'RESULT-algorithm_name',
         'BlastOutput_version'             => 'RESULT-algorithm_version',
+        'BlastOutput_algorithm-reference' => 'RESULT-algorithm_reference',
+        'BlastOutput_rid'                 => 'RESULT-rid',
         'BlastOutput_query-def'           => 'RESULT-query_name',
         'BlastOutput_query-len'           => 'RESULT-query_length',
         'BlastOutput_query-acc'           => 'RESULT-query_accession',
@@ -255,6 +257,11 @@ BEGIN {
         'Statistics_hit_to_db' => { 'RESULT-statistics' => 'Hits_to_DB' },
         'Statistics_num_suc_extensions' =>
           { 'RESULT-statistics' => 'num_successful_extensions' },
+        'Statistics_length_adjustment' => { 'RESULT-statistics' => 'length_adjustment' },
+        'Statistics_number_of_hsps_better_than_expect_value_cutoff_without_gapping' =>
+		  { 'RESULT-statistics' => 'number_of_hsps_better_than_expect_value_cutoff_without_gapping' },
+        'Statistics_number_of_hsps_gapped' => { 'RESULT-statistics' => 'number_of_hsps_gapped' },
+        'Statistics_number_of_hsps_successfully_gapped' => { 'RESULT-statistics' => 'number_of_hsps_successfully_gapped' },
 
         # WU-BLAST stats
         'Statistics_DFA_states' => { 'RESULT-statistics' => 'num_dfa_states' },
@@ -321,7 +328,7 @@ BEGIN {
         $MAPPING{$key} = $val;
     }
 
-    $DEFAULT_BLAST_WRITER_CLASS = 'Bio::Search::Writer::HitTableWriter';
+    $DEFAULT_BLAST_WRITER_CLASS = 'Bio::SearchIO::Writer::HitTableWriter';
     $MAX_HSP_OVERLAP   = 2;           # Used when tiling multiple HSPs.
     $DEFAULTREPORTTYPE = 'BLASTP';    # for bl2seq
 }
@@ -461,6 +468,7 @@ sub next_result {
         next if (/^\s+$/);       # skip empty lines
         next if (/CPU time:/);
         next if (/^>\s*$/);
+        next if (/\Q***** No hits found ******\E/);
         if (
                /^((?:\S+?)?BLAST[NPX]?)\s+(.+)$/i  # NCBI BLAST, PSIBLAST
                                                    # RPSBLAST, MEGABLAST
@@ -500,6 +508,36 @@ sub next_result {
                 {
                     'Name' => 'BlastOutput_inclusion-threshold',
                     'Data' => $incl_threshold
+                }
+            );
+        }
+        # parse the BLAST algorithm reference
+        elsif(/^Reference:\s+(.*)$/) {
+            # want to preserve newlines for the BLAST algorithm reference
+            my $algorithm_reference = "$1\n";
+            $_ = $self->_readline;
+            # while the current line, does not match an empty line, a RID:, a Database:, or a query definition line (Query=)
+			# we are still looking at the algorithm_reference, append it to what we parsed so far
+            while($_ !~ /^$/ && $_ !~ /^RID:/ && $_ !~ /^Database:/ && $_ !~ /^Query=/) {
+                $algorithm_reference .= "$_";
+                $_ = $self->_readline;
+            }	
+            # if we exited the while loop, we saw an empty line, a RID:, or a Database:, so push it back		
+            $self->_pushback($_);
+            $self->element(
+                {
+                    'Name' => 'BlastOutput_algorithm-reference',
+                    'Data' => $algorithm_reference
+                }
+            );
+        }
+        # parse BLAST RID (Request ID)
+        elsif(/^RID:\s+(.*)$/) {
+            my $rid = $1;
+            $self->element(
+                {
+                    'Name' => 'BlastOutput_rid',
+                    'Data' => $rid
                 }
             );
         }
@@ -768,21 +806,6 @@ sub next_result {
                 }
             );
         }
-        # bypasses this NCBI blast 2.2.13 extra output for now...
-		# Features in/flanking this part of subject sequence:
-        elsif (/^\sFeatures\s\w+\sthis\spart/xmso) {
-            my $featline;
-            $_ = $self->_readline;
-			while($_ !~ /^\s*$/) {
-                chomp;
-                $featline .= $_;
-        		$_ = $self->_readline;
-        	}
-			$self->_pushback($_);
-            $featline =~ s{(?:^\s+|\s+^)}{}g;
-            $featline =~ s{\n}{;}g;
-            $self->{'_last_hspdata'}->{'Hsp_features'} = $featline;
-        }
         
         # move inside of a hit
         elsif (/^>\s*(\S+)\s*(.*)?/) {
@@ -1003,19 +1026,49 @@ sub next_result {
         elsif (
             ( $self->in_element('hit') || $self->in_element('hsp') )
             &&    # ncbi blast, works with 2.2.17
+            m/^\sFeatures\s\w+\sthis\spart/xmso
+            # If the line begins with "Features in/flanking this part of subject sequence:"
+            )
+        {
+            $self->in_element('hsp')
+              && $self->end_element( { 'Name' => 'Hsp' } );
+            my $featline;
+            $_ = $self->_readline;
+            while($_ !~ /^\s*$/) {
+                chomp;
+                $featline .= $_;
+                $_ = $self->_readline;
+            }
+            $self->_pushback($_);
+            $featline =~ s{(?:^\s+|\s+^)}{}g;
+            $featline =~ s{\n}{;}g;
+            $self->start_element( { 'Name' => 'Hsp' } );
+            $self->element(
+                {
+                    'Name' => 'Hsp_features',
+                    'Data' => $featline
+                }
+            );
+            $self->{'_seen_hsp_features'} = 1;
+        }
+        elsif (
+            ( $self->in_element('hit') || $self->in_element('hsp') )
+            &&    # ncbi blast, works with 2.2.17
             m/Score\s*=\s*(\S+)\s*bits\s* # Bit score
-                (?:\((\d+)\))?,            # Missing for BLAT pseudo-BLAST fmt 
+                (?:\((\d+)\))?,            # Missing for BLAT pseudo-BLAST fmt
                 \s*Expect(?:\((\d+\+?)\))?\s*=\s*([^,\s]+) # E-value
                 /ox
           )
         {         # parse NCBI blast HSP
-            $self->in_element('hsp')
-              && $self->end_element( { 'Name' => 'Hsp' } );
+            if( !$self->{'_seen_hsp_features'} ) {
+                $self->in_element('hsp')
+                  && $self->end_element( { 'Name' => 'Hsp' } );
+                $self->start_element( { 'Name' => 'Hsp' } );
+            }
 
             # Some data clean-up so e-value will appear numeric to perl
             my ( $bits, $score, $n, $evalue ) = ( $1, $2, $3, $4 );
             $evalue =~ s/^e/1e/i;
-            $self->start_element( { 'Name' => 'Hsp' } );
             $self->element(
                 {
                     'Name' => 'Hsp_score',
@@ -1603,7 +1656,7 @@ sub next_result {
                             );
                         }
                     }
-                    elsif (m/effective\s+search\s+space\s+used:\s+(\d+)/ox) {
+                    elsif (m/effective\s+search\s+space\s+used:\s+(\d+)/oxi) {
                         $self->element(
                             {
                                 'Name' => 'Statistics_eff-spaceused',
@@ -1611,7 +1664,7 @@ sub next_result {
                             }
                         );
                     }
-                    elsif (m/effective\s+search\s+space:\s+(\d+)/ox) {
+                    elsif (m/effective\s+search\s+space:\s+(\d+)/oxi) {
                         $self->element(
                             {
                                 'Name' => 'Statistics_eff-space',
@@ -1645,7 +1698,39 @@ sub next_result {
                             }
                         );
                     }
-                    elsif (/effective\s+length\s+of\s+query:\s+([\d\,]+)/) {
+                    elsif (/Number\s+of\s+HSP's\s+better\s+than\s+(\S+)\s+without\s+gapping:\s+(\d+)/) {
+                        $self->element(
+                            {
+                                'Name' => 'Statistics_number_of_hsps_better_than_expect_value_cutoff_without_gapping',
+                                'Data' => $2
+                            }
+                        );
+                    }
+                    elsif (/Number\s+of\s+HSP's\s+gapped:\s+(\d+)/) {
+                        $self->element(
+                            {
+                                'Name' => 'Statistics_number_of_hsps_gapped',
+                                'Data' => $1
+                            }
+                        );
+                    }
+                    elsif (/Number\s+of\s+HSP's\s+successfully\s+gapped:\s+(\d+)/) {
+                        $self->element(
+                            {
+                                'Name' => 'Statistics_number_of_hsps_successfully_gapped',
+                                'Data' => $1
+                            }
+                        );
+                    }
+                    elsif (/Length\s+adjustment:\s+(\d+)/) {
+                        $self->element(
+                            {
+                                'Name' => 'Statistics_length_adjustment',
+                                'Data' => $1
+                            }
+                        );
+                    }
+                    elsif (/effective\s+length\s+of\s+query:\s+([\d\,]+)/i) {
                         my $c = $1;
                         $c =~ s/\,//g;
                         $self->element(
@@ -1655,7 +1740,7 @@ sub next_result {
                             }
                         );
                     }
-                    elsif (/effective\s+length\s+of\s+database:\s+([\d\,]+)/) {
+                    elsif (/effective\s+length\s+of\s+database:\s+([\d\,]+)/i) {
                         my $c = $1;
                         $c =~ s/\,//g;
                         $self->element(
@@ -1787,7 +1872,7 @@ sub next_result {
                     last;
                 }
                 chomp;
-                if (/^((Query|Sbjct):?\s+(\-?\d+)\s*)(\S+)\s+(\-?\d+)/) {
+                if (/^((Query|Sbjct):?\s+(\-?\d+)?\s*)(\S+)\s+(\-?\d+)?/) {
                     my ( $full, $type, $start, $str, $end ) =
                       ( $1, $2, $3, $4, $5 );
 
@@ -1801,6 +1886,10 @@ sub next_result {
                     $self->{"\_$type"}->{'begin'} = $start
                       unless $self->{"_$type"}->{'begin'};
                     $self->{"\_$type"}->{'end'} = $end;
+                } elsif (/^((Query|Sbjct):?\s+(\-?0+)\s*)/) {
+                   # Bug from NCBI's BLAST: unaligned output
+                   $_ = $self->_readline() for 0..1;
+                   last;
                 } else {
                     $self->throw("no data for midline $_")
                       unless ( defined $_ && defined $len );
@@ -2054,6 +2143,7 @@ sub end_element {
     $self->{'_last_data'} = '';    # remove read data if we are at
                                    # end of an element
     $self->{'_result'} = $rc if ( defined $type && $type eq 'result' );
+	$self->{'_seen_hsp_features'} = 0;
     return $rc;
 }
 

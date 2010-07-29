@@ -81,6 +81,11 @@ Bio::DB::SeqFeature::Store -- Storage and retrieval of sequence annotation data
   my $segment  = $db->segment('Chr1',5000=>6000);
   my @features = $segment->features(-type=>['mRNA','match']);
 
+  # getting coverage statistics across a region
+  my $summary = $db->feature_summary('Chr1',10_000=>1_110_000);
+  my $bins    = $summary->get_tag_values('coverage');
+  my $first_bin = $bins->[0];
+
   # getting & storing sequence information
   # Warning: this returns a string, and not a PrimarySeq object
   $db->insert_sequence('Chr1','GATCCCCCGGGATTCCAAAA...');
@@ -334,7 +339,18 @@ ones:
 		    L<Bio::DB::SeqFeature::Store::GFF3Loader> for a
 		    description of this. Default is the current
                     directory.
+
  -write             Make the database writeable (implied by -create)
+
+ -fasta             Provide an alternative DNA accessor object or path.
+
+By default the database will store DNA sequences internally. However,
+you may override this behavior by passing either a path to a FASTA
+file, or any Perl object that recognizes the seq($seqid,$start,$end)
+method. In the former case, the FASTA path will be passed to
+Bio::DB::Fasta, possibly causing an index to be constructed. Suitable
+examples of the latter type of object include the Bio::DB::Sam and
+Bio::DB::Sam::Fai classes.
 
 =cut
 
@@ -343,12 +359,12 @@ ones:
 #
 sub new {
   my $self      = shift;
-  my ($adaptor,$serializer,$index_subfeatures,$cache,$compress,$debug,$create,$args);
+  my ($adaptor,$serializer,$index_subfeatures,$cache,$compress,$debug,$create,$fasta,$args);
   if (@_ == 1) {
     $args = {DSN => shift}
   }
   else {
-    ($adaptor,$serializer,$index_subfeatures,$cache,$compress,$debug,$create,$args) =
+    ($adaptor,$serializer,$index_subfeatures,$cache,$compress,$debug,$create,$fasta,$args) =
       rearrange(['ADAPTOR',
 		 'SERIALIZER',
 		 'INDEX_SUBFEATURES',
@@ -356,6 +372,7 @@ sub new {
 		 'COMPRESS',
 		 'DEBUG',
 		 'CREATE',
+		 'FASTA',
 		],@_);
   }
   $adaptor ||= 'DBI::mysql';
@@ -373,6 +390,7 @@ sub new {
   $obj->serializer($serializer)               if defined $serializer;
   $obj->index_subfeatures($index_subfeatures) if defined $index_subfeatures;
   $obj->seqfeature_class('Bio::DB::SeqFeature');
+  $obj->set_dna_accessor($fasta)              if defined $fasta;
   $obj->post_init($args);
   $obj;
 }
@@ -508,8 +526,6 @@ sub store_noindex {
 This method saves lots of space in the database, which may in turn lead to large
 performance increases in extreme cases (over 7 million features in the db).
 
-Currently only applies to the mysql implementation.
-
 =cut
 
 sub no_blobs {
@@ -606,7 +622,9 @@ sub delete {
   my $success = 1;
   for my $object (@_) {
     my $id = $object->primary_id;
-    $success &&= $self->_deleteid($id);
+    my $result = $self->_deleteid($id);
+    warn "Could not delete feature with id=$id" unless $result;
+    $success &&= $result;
   }
   $success;
 }
@@ -982,7 +1000,7 @@ match all the filters are returned.
 
  Location filters:
   -seq_id        Chromosome, contig or other DNA segment
-  -seqid         Synonym for -seqid
+  -seqid         Synonym for -seq_id
   -ref           Synonym for -seqid
   -start         Start of range
   -end           End of range
@@ -1249,7 +1267,7 @@ sub fetch_sequence {
   my ($seqid,$start,$end,$class,$bioseq) = rearrange([['NAME','SEQID','SEQ_ID'],
 						      'START',['END','STOP'],'CLASS','BIOSEQ'],@_);
   $seqid = "$seqid:$class" if defined $class;
-  my $seq = $self->_fetch_sequence($seqid,$start,$end);
+  my $seq = $self->seq($seqid,$start,$end);
   return $seq unless $bioseq;
 
   require Bio::Seq unless Bio::Seq->can('new');
@@ -1349,7 +1367,8 @@ END
 	$end   = $f->end - $rel_start + 1;
       }
     }
-    push @segments,Bio::DB::SeqFeature::Segment->new($self,$seqid,$start,$end,$strand);
+    my $id = eval{$f->primary_id};
+    push @segments,Bio::DB::SeqFeature::Segment->new($self,$seqid,$start,$end,$strand,$id);
   }
   return wantarray ? @segments : $segments[0];
 }
@@ -1566,6 +1585,54 @@ sub serializer {
     }
   }
   $d;
+}
+
+=head2 dna_accessor
+
+ Title   : dna_accessor
+ Usage   : $dna_accessor = $db->dna_accessor([$new_dna_accessor])
+ Function: get/set the name of the dna_accessor
+ Returns : the current dna_accessor object, if any
+ Args    : (optional) the dna_accessor object
+ Status  : public
+
+You can use this method to request or set the DNA accessor.
+
+=cut
+
+###
+# dna_accessor
+#
+sub dna_accessor {
+  my $self = shift;
+  my $d    = $self->{dna_accessor};
+  $self->{dna_accessor} = shift if @_;
+  $d;
+}
+
+sub can_do_seq {
+    my $self = shift;
+    my $obj  = shift;
+    return 
+	UNIVERSAL::can($obj,'seq') ||
+	UNIVERSAL::can($obj,'fetch_sequence');
+}
+
+sub set_dna_accessor {
+    my $self = shift;
+    my $accessor = shift;
+    if (-e $accessor) {  # a file, assume it is a fasta file
+	eval "require Bio::DB::Fasta" unless Bio::DB::Fasta->can('new');
+	my $a = Bio::DB::Fasta->new($accessor)
+	    or croak "Can't open FASTA file $accessor: $!";
+	$self->dna_accessor($a);
+    }
+
+    if (ref $accessor && $self->can_do_seq($accessor)) {
+	$self->dna_accessor($accessor);  # already built
+    }
+
+    return;
 }
 
 sub do_compress {
@@ -1960,6 +2027,19 @@ sequence.
 =cut
 
 sub _fetch_sequence    { shift->throw_not_implemented }
+
+sub seq {
+    my $self     = shift;
+    my ($seq_id,$start,$end) = @_;
+    if (my $a = $self->dna_accessor) {
+	return $a->can('seq')           ? $a->seq($seq_id,$start,$end)
+	      :$a->can('fetch_sequence')? $a->fetch_sequence($seq_id,$start,$end)
+          : undef;
+    }
+    else {
+	return $self->_fetch_sequence($seq_id,$start,$end);
+    }
+}
 
 =head2 _seq_ids
 
@@ -2500,6 +2580,125 @@ sub feature_names {
   my @aliases = grep {defined} $obj->get_tag_values('Alias') if $obj->has_tag('Alias');
 
   return (\@names,\@aliases);
+}
+
+=head2 feature_summary
+
+ Title   : feature_summary
+ Usage   : $summary = $db->feature_summary(@args)
+ Function: returns a coverage summary across indicated region/type
+ Returns : a Bio::SeqFeatureI object containing the "coverage" tag
+ Args    : see below
+ Status  : public
+
+This method is used to get coverage density information across a
+region of interest. You provide it with a region of interest, optional
+a list of feature types, and a count of the number of bins over which
+you want to calculate the coverage density. An object is returned
+corresponding to the requested region. It contains a tag called
+"coverage" that will return an array ref of "bins" length. Each
+element of the array describes the number of features that overlap the
+bin at this postion.
+
+Arguments:
+
+  Argument       Description
+  --------       -----------
+
+  -seq_id        Sequence ID for the region
+  -start         Start of region
+  -end           End of region
+  -type/-types   Feature type of interest or array ref of types
+  -bins          Number of bins across region. Defaults to 1000.
+  -iterator      Return an iterator across the region
+
+Note that this method uses an approximate algorithm that is only
+accurate to 500 bp, so when dealing with bins that are smaller than
+1000 bp, you may see some shifting of counts between adjacent bins.
+
+Although an -iterator option is provided, the method only ever returns
+a single feature, so this is fairly useless.
+
+=cut
+
+
+sub feature_summary {
+    my $self = shift;
+    my ($seq_name,$start,$end,$types,$bins,$iterator) = 
+	rearrange([['SEQID','SEQ_ID','REF'],'START',['STOP','END'],
+		   ['TYPES','TYPE','PRIMARY_TAG'],
+		   'BINS',
+		   'ITERATOR',
+		  ],@_);
+    my ($coverage,$tag) = $self->coverage_array(-seqid=> $seq_name,
+						-start=> $start,
+						-end  => $end,
+						-type => $types,
+						-bins => $bins) or return;
+    my $score = 0;
+    for (@$coverage) { $score += $_ }
+    $score /= @$coverage;
+
+    my $feature = Bio::SeqFeature::Lite->new(-seq_id => $seq_name,
+					     -start  => $start,
+					     -end    => $end,
+					     -type   => $tag,
+					     -score  => $score,
+					     -attributes => 
+					     { coverage => [$coverage] });
+    return $iterator 
+	   ? Bio::DB::SeqFeature::Store::FeatureIterator->new($feature) 
+	   : $feature;
+}
+
+=head2 coverage_array
+
+ Title   : coverage_array
+ Usage   : $arrayref = $db->coverage_array(@args)
+ Function: returns a coverage summary across indicated region/type
+ Returns : an array reference
+ Args    : see below
+ Status  : public
+
+This method is used to get coverage density information across a
+region of interest. The arguments are identical to feature_summary,
+except that instead of returning a Bio::SeqFeatureI object, it returns
+an array reference of the desired number of bins. The value of each
+element corresponds to the number of features in the bin.
+
+Arguments:
+
+  Argument       Description
+  --------       -----------
+
+  -seq_id        Sequence ID for the region
+  -start         Start of region
+  -end           End of region
+  -type/-types   Feature type of interest or array ref of types
+  -bins          Number of bins across region. Defaults to 1000.
+
+Note that this method uses an approximate algorithm that is only
+accurate to 500 bp, so when dealing with bins that are smaller than
+1000 bp, you may see some shifting of counts between adjacent bins.
+
+=cut
+
+sub coverage_array {
+    shift->throw_not_implemented;
+}
+
+
+package Bio::DB::SeqFeature::Store::FeatureIterator;
+
+sub new {
+    my $self     = shift;
+    my @features = @_;
+    return bless \@features,ref $self || $self;
+}
+sub next_seq {
+  my $self  = shift;
+  return unless @$self;
+  return shift @$self;
 }
 
 

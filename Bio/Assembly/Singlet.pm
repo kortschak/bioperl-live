@@ -34,7 +34,10 @@ Bio::Assembly::Singlet - Perl module to hold and manipulate
     # OR, if you want to build the singlet yourself,
 
     use Bio::Assembly::Singlet;
-    $singlet = Bio::Assembly::Singlet->new( -seqref => $seq );
+    $singlet = Bio::Assembly::Singlet->new(
+        -id     => 'Singlet1',
+        -seqref => $seq
+    );
 
 =head1 DESCRIPTION
 
@@ -87,7 +90,9 @@ package Bio::Assembly::Singlet;
 use strict;
 
 use Bio::SeqFeature::Collection;
+use Bio::LocatableSeq;
 use Bio::Seq::PrimaryQual;
+
 use base qw(Bio::Assembly::Contig Bio::Root::Root Bio::Align::AlignI);
 
 =head2 new
@@ -117,7 +122,7 @@ sub new {
     Usage   : $seqref = $singlet->seqref($seq);
     Function: Get/set the sequence to which this singlet refers
     Returns : A Bio::Seq-compliant object
-    Args    : A Bio::Seq-compliant object
+    Args    : A Bio::Seq-compliant or Bio::Seq::Quality object
 
 =cut
 
@@ -132,38 +137,40 @@ sub seqref {
     Title   : _seq_to_singlet
     Usage   : $singlet->seqref($seq)
     Function: Transform a sequence into a singlet
-    Returns : A Bio::Assembly::Singlet object
+    Returns : 1 for sucess
     Args    : A Bio::Seq-compliant object
 
 =cut
 
 sub _seq_to_singlet {
-    my ($self, $seq) = @_;    
+    my ($self, $seq) = @_;
     # Object type checking
     $self->throw("Unable to process non Bio::Seq-compliant object [".ref($seq)."]")
-      unless (defined $seq && ($seq->isa("Bio::Seq") || $seq->isa("Bio::LocatableSeq")) );
+      unless ( defined $seq && ($seq->isa('Bio::PrimarySeqI') || $seq->isa('Bio::Seq::Quality')) );
     # Sanity check
-    $self->throw("Unable to have more than one seqref in a singlet")
+    $self->throw("Unable to have more than one sequence reference in a singlet")
       if (defined $self->{'_seqref'});
     # From sequence to locatable sequence
-    my $seq_id = $seq->id();
     my $lseq = Bio::LocatableSeq->new(
-        -seq    => $seq->seq(),
+        -id     => $seq->id,
+        -seq    => $seq->seq,
+        -strand => $seq->isa('Bio::LocatableSeq') ? $seq->strand : 1,
         -start  => 1,
-        -end    => $seq->length(),
-        -strand => 1,
-        -id     => $seq_id
+        #-end   => we let Bio::LocatableSeq calculate it (Seq and LocatableSeq)
     );
-    # Add new sequence
-    $self->add_seq($lseq);
-    # Creating singlet ID, seqref and consensus
-    $self->id($seq_id);
-    $self->{'_seqref'} = $seq;
+    # Add new sequence and its coordinates to the contig
+    my $lcoord = Bio::SeqFeature::Generic->new( -start => $lseq->start,
+                                                -end   => $lseq->end    );
+    $self->set_seq_coord( $lcoord, $lseq );
+    $self->{'_seqref'} = $lseq;
+    # Creating consensus
     $self->set_consensus_sequence($lseq);
     if ($seq->isa("Bio::Seq::Quality")) {
-        $self->set_consensus_quality($seq);
+        my $qual = Bio::Seq::PrimaryQual->new( -id   => $seq->id,
+                                               -qual => $seq->qual );
+        $self->set_consensus_quality($qual);
     }
-    return;
+    return 1;
 }
 
 1;

@@ -159,6 +159,7 @@ use Cwd 'abs_path';
 use Bio::DB::GFF::Util::Rearrange 'rearrange';
 use Bio::SeqFeature::Lite;
 use File::Spec;
+use Carp 'carp','cluck','croak';
 use constant DEBUG=>0;
 
 # from the MySQL documentation...
@@ -167,6 +168,11 @@ use constant MAX_INT =>  2_147_483_647;
 use constant MIN_INT => -2_147_483_648;
 use constant MAX_BIN =>  1_000_000_000;  # size of largest feature = 1 Gb
 use constant MIN_BIN =>  1000;           # smallest bin we'll make - on a 100 Mb chromosome, there'll be 100,000 of these
+use constant SUMMARY_BIN_SIZE => 1000;
+
+# tier 0 == 1000 bp bins
+# tier 1 == 10,000 bp bins
+# etc.
 
 memoize('_typeid');
 memoize('_locationid');
@@ -315,6 +321,15 @@ END
   primary key(id,offset)
 )
 END
+	  interval_stats => <<END,
+(
+   typeid            integer not null,
+   seqid             integer not null,
+   bin               integer not null,
+   cum_count         integer not null,
+   primary key(typeid,seqid,bin)
+)
+END
 	 };
 }
 
@@ -368,6 +383,13 @@ sub namespace {
 }
 
 ###
+# Required for Pg not mysql
+#
+sub remove_namespace {
+  return;
+}
+
+###
 # find a path that corresponds to a dump table
 #
 sub dump_path {
@@ -402,7 +424,8 @@ sub next_id {
 #
 sub max_id {
   my $self = shift;
-  my $sth  = $self->_prepare("SELECT max(id) from feature");
+  my $features = $self->_feature_table;
+  my $sth  = $self->_prepare("SELECT max(id) from $features");
   $sth->execute or $self->throw($sth->errstr);
   my ($id) = $sth->fetchrow_array;
   $id;
@@ -417,11 +440,12 @@ sub _init_database {
 
   my $dbh    = $self->dbh;
   my $tables = $self->table_definitions;
-  foreach (keys %$tables) {
-    next if $_ eq 'meta';      # don't get rid of meta data!
-    my $table = $self->_qualify($_);
+  
+  for my $t (keys %$tables) {
+    next if $t eq 'meta';      # don't get rid of meta data!
+    my $table = $self->_qualify($t);
     $dbh->do("DROP table IF EXISTS $table") if $erase;
-    my $query = "CREATE TABLE IF NOT EXISTS $table $tables->{$_}";
+    my $query = "CREATE TABLE IF NOT EXISTS $table $tables->{$t}";
     $self->_create_table($dbh,$query);
   }
   $self->subfeatures_are_indexed(1) if $erase;
@@ -430,13 +454,15 @@ sub _init_database {
 
 sub init_tmp_database {
   my $self = shift;
+  
   my $dbh    = $self->dbh;
   my $tables = $self->table_definitions;
+  
   for my $t (keys %$tables) {
-      next if $t eq 'meta';  # done earlier
-      my $table = $self->_qualify($t);
-      my $query = "CREATE TEMPORARY TABLE $table $tables->{$t}";
-      $self->_create_table($dbh,$query);
+    next if $t eq 'meta';  # done earlier
+    my $table = $self->_qualify($t);
+    my $query = "CREATE TEMPORARY TABLE $table $tables->{$t}";
+    $self->_create_table($dbh,$query);
   }
   1;
 }
@@ -454,10 +480,10 @@ sub _create_table {
 sub maybe_create_meta {
   my $self = shift;
   return unless $self->writeable;
-  my $table  = $self->_qualify('meta');
+  my $meta   = $self->_meta_table;
   my $tables = $self->table_definitions;
   my $temporary = $self->is_temp ? 'TEMPORARY' : '';
-  $self->dbh->do("CREATE $temporary TABLE IF NOT EXISTS $table $tables->{meta}");
+  $self->dbh->do("CREATE $temporary TABLE IF NOT EXISTS $meta $tables->{meta}");
 }
 
 ###
@@ -536,12 +562,11 @@ sub _finish_bulk_update {
   my $self = shift;
   my $dbh  = $self->dbh;
   my $dir = $self->{dumpdir} || '.';
-  for my $table ('feature',$self->index_tables) {
+  for my $table ($self->_feature_table,$self->index_tables) {
     my $fh = $self->dump_filehandle($table);
     my $path = $self->dump_path($table);
     $fh->close;
-    my $qualified_table = $self->_qualify($table);
-    $dbh->do("LOAD DATA LOCAL INFILE '$path' REPLACE INTO TABLE $qualified_table FIELDS OPTIONALLY ENCLOSED BY '\\''") 
+    $dbh->do("LOAD DATA LOCAL INFILE '$path' REPLACE INTO TABLE $table FIELDS OPTIONALLY ENCLOSED BY '\\''") 
       or $self->throw($dbh->errstr);
     unlink $path;
   }
@@ -565,11 +590,11 @@ sub _add_SeqFeature {
   my $dbh = $self->dbh;
   local $dbh->{RaiseError} = 1;
 
-  my $child_table = $self->_parent2child_table();
+  my $parent2child = $self->_parent2child_table();
   my $count = 0;
 
   my $sth = $self->_prepare(<<END);
-REPLACE INTO $child_table (id,child) VALUES (?,?)
+REPLACE INTO $parent2child (id,child) VALUES (?,?)
 END
 
   my $parent_id = (ref $parent ? $parent->primary_id : $parent) 
@@ -602,10 +627,10 @@ sub _fetch_SeqFeatures {
   my @types  = @_;
 
   my $parent_id = $parent->primary_id or $self->throw("$parent should have a primary_id");
-  my $feature_table = $self->_feature_table;
-  my $child_table   = $self->_parent2child_table();
+  my $features = $self->_feature_table;
+  my $parent2child   = $self->_parent2child_table();
 
-  my @from  = ("$feature_table as f","$child_table as c");
+  my @from  = ("$features as f","$parent2child as c");
   my @where = ('f.id=c.child','c.id=?');
   my @args  = $parent_id;
 
@@ -650,23 +675,24 @@ sub _fetch_sequence {
   $start-- if defined $start;
   $end--   if defined $end;
 
-  my $offset1 = $self->_offset_boundary($seqid,$start || 'left');
-  my $offset2 = $self->_offset_boundary($seqid,$end   || 'right');
+  my $id      = $self->_locationid($seqid);
+  my $offset1 = $self->_offset_boundary($id,$start || 'left');
+  my $offset2 = $self->_offset_boundary($id,$end   || 'right');
   my $sequence_table = $self->_sequence_table;
-  my $locationlist_table = $self->_locationlist_table;
 
-  my $sth     = $self->_prepare(<<END);
+  my $sql = <<END;
 SELECT sequence,offset
-   FROM $sequence_table as s,$locationlist_table as ll
-   WHERE s.id=ll.id
-     AND ll.seqname= ?
-     AND offset >= ?
-     AND offset <= ?
-   ORDER BY offset
+   FROM $sequence_table as s
+   WHERE s.id=?
+     AND s.offset >= ?
+     AND s.offset <= ?
+   ORDER BY s.offset
 END
 
+  my $sth     = $self->_prepare($sql);
   my $seq = '';
-  $sth->execute($seqid,$offset1,$offset2) or $self->throw($sth->errstr);
+  $self->_print_query($sql,$id,$offset1,$offset2) if DEBUG || $self->debug;
+  $sth->execute($id,$offset1,$offset2) or $self->throw($sth->errstr);
 
   while (my($frag,$offset) = $sth->fetchrow_array) {
     substr($frag,0,$start-$offset) = '' if defined $start && $start > $offset;
@@ -689,11 +715,12 @@ sub _offset_boundary {
   my $locationlist_table = $self->_locationlist_table;
 
   my $sql;
-  $sql =  $position eq 'left'  ? "SELECT min(offset) FROM $sequence_table as s,$locationlist_table as ll WHERE s.id=ll.id AND ll.seqname=?"
-         :$position eq 'right' ? "SELECT max(offset) FROM $sequence_table as s,$locationlist_table as ll WHERE s.id=ll.id AND ll.seqname=?"
-	 :"SELECT max(offset) FROM $sequence_table as s,$locationlist_table as ll WHERE s.id=ll.id AND ll.seqname=? AND offset<=?";
+  $sql =  $position eq 'left'  ? "SELECT min(offset) FROM $sequence_table as s WHERE s.id=?"
+         :$position eq 'right' ? "SELECT max(offset) FROM $sequence_table as s WHERE s.id=?"
+	 :"SELECT max(offset) FROM $sequence_table as s WHERE s.id=? AND offset<=?";
   my $sth = $self->_prepare($sql);
   my @args = $position =~ /^-?\d+$/ ? ($seqid,$position) : ($seqid);
+  $self->_print_query($sql,@args) if DEBUG || $self->debug;
   $sth->execute(@args) or $self->throw($sth->errstr);
   my $boundary = $sth->fetchall_arrayref->[0][0];
   $sth->finish;
@@ -755,22 +782,22 @@ sub _features {
       $range_type,
       $fromtable,
       $iterator,
-      $sources
-     ) = rearrange([['SEQID','SEQ_ID','REF'],'START',['STOP','END'],'STRAND',
-		    'NAME','CLASS','ALIASES',
-		    ['TYPES','TYPE','PRIMARY_TAG'],
-		    ['ATTRIBUTES','ATTRIBUTE'],
-		    'RANGE_TYPE',
-		    'FROM_TABLE',
-		    'ITERATOR',
-		    ['SOURCE','SOURCES']
-		   ],@_);
+      $sources,
+      ) = rearrange([['SEQID','SEQ_ID','REF'],'START',['STOP','END'],'STRAND',
+		     'NAME','CLASS','ALIASES',
+		     ['TYPES','TYPE','PRIMARY_TAG'],
+		     ['ATTRIBUTES','ATTRIBUTE'],
+		     'RANGE_TYPE',
+		     'FROM_TABLE',
+		     'ITERATOR',
+		     ['SOURCE','SOURCES'],
+		    ],@_);
 
   my (@from,@where,@args,@group);
   $range_type ||= 'overlaps';
 
-  my $feature_table         = $self->_feature_table;
-  @from = "$feature_table as f";
+  my $features         = $self->_feature_table;
+  @from = "$features as f";
 
   if (defined $name) {
     # hacky backward compatibility workaround
@@ -816,6 +843,7 @@ sub _features {
         $types = [map { ':'.$_ } @sources];
     }
   }
+
   if (defined($types)) {
     # last argument is the name of the features table
     my ($from,$where,$group,@a) = $self->_types_sql($types,'f');
@@ -858,12 +886,42 @@ SELECT f.id,f.object,f.typeid,f.seqid,f.start,f.end,f.strand
   WHERE $where
   $group
 END
-
+;
   $self->_print_query($query,@args) if DEBUG || $self->debug;
 
   my $sth = $self->_prepare($query) or $self->throw($self->dbh->errstr);
   $sth->execute(@args) or $self->throw($sth->errstr);
   return $iterator ? Bio::DB::SeqFeature::Store::DBI::Iterator->new($sth,$self) : $self->_sth2objs($sth);
+}
+
+sub _aggregate_bins {
+    my $self = shift;
+    my $sth  = shift;
+    my (%types,$binsize,$binstart);
+    while (my ($type,$seqname,$bin,$count,$bins,$start,$end) = $sth->fetchrow_array) {
+	$binsize                ||= ($end-$start+1)/$bins;
+	$binstart               ||= int($start/$binsize);
+	$types{$type}{seqname}  ||= $seqname;
+	$types{$type}{min}      ||= $start;
+	$types{$type}{max}      ||= $end;
+	$types{$type}{bins}     ||= [(0) x $bins];
+	$types{$type}{bins}[$bin-$binstart] = $count;
+	$types{$type}{count} += $count;
+    }
+    my @results;
+    for my $type (keys %types) {
+	my $min  = $types{$type}{min};
+	my $max  = $types{$type}{max};
+	my $seqid= $types{$type}{seqname};
+	my $f = Bio::SeqFeature::Lite->new(-seq_id => $seqid,
+					   -start  => $min,
+					   -end    => $max,
+					   -type   => "$type:bins",
+					   -score  => $types{$type}{count},
+					   -attributes => {coverage => join ',',@{$types{$type}{bins}}});
+	push @results,$f;
+    }
+    return @results;
 }
 
 sub _name_sql {
@@ -1028,7 +1086,7 @@ sub _location_sql {
 
   # the additional join on the location_list table badly impacts performance
   # so we build a copy of the table in memory
-  my $seqid = $self->_locationid($seq_id) || 0; # zero is an invalid primary ID, so will return empty
+  my $seqid = $self->_locationid_nocreate($seq_id) || 0; # zero is an invalid primary ID, so will return empty
 
   $start = MIN_INT unless defined $start;
   $end   = MAX_INT unless defined $end;
@@ -1093,7 +1151,7 @@ sub reindex {
       my $query = $from_update_table ? "DELETE $table FROM $table,$update WHERE $table.id=$update.id"
 	                             : "DELETE FROM $table";
       $dbh->do($query);
-      $dbh->do("ALTER TABLE $table DISABLE KEYS");
+      $self->_disable_keys($dbh,$table);
     }
     my $iterator = $self->get_seq_stream(-from_table=>$from_update_table ? $update : undef);
     while (my $f = $iterator->next_seq) {
@@ -1108,7 +1166,7 @@ sub reindex {
     }
   };
   for my $table ($self->index_tables) {
-    $dbh->do("ALTER TABLE $table ENABLE KEYS");
+      $self->_enable_keys($dbh,$table);
   }
   if (@_) {
     warn "Couldn't complete transaction: $@";
@@ -1128,8 +1186,8 @@ sub optimize {
 sub all_tables {
   my $self = shift;
   my @index_tables = $self->index_tables;
-  my $feature_table = $self->_feature_table;
-  return ($feature_table,@index_tables);
+  my $features = $self->_feature_table;
+  return ($features,@index_tables);
 }
 
 sub index_tables {
@@ -1182,8 +1240,8 @@ sub _deleteid {
   my $self = shift;
   my $key  = shift;
   my $dbh = $self->dbh;
-  my $child_table = $self->_parent2child_table;
-  my $query = "SELECT child FROM $child_table WHERE id=?";
+  my $parent2child = $self->_parent2child_table;
+  my $query = "SELECT child FROM $parent2child WHERE id=?";
   my $sth=$self->_prepare($query);
   $sth->execute($key);
   my $success = 0;
@@ -1191,7 +1249,7 @@ sub _deleteid {
     # Backcheck looking for multiple parents, delete only if one is present. I'm
     # sure there is a nice way to left join the parent2child table onto itself
     # to get this in one query above, just haven't worked it out yet...
-    my $sth2 = $self->_prepare("SELECT count(id) FROM $child_table WHERE child=?");
+    my $sth2 = $self->_prepare("SELECT count(id) FROM $parent2child WHERE child=?");
     $sth2->execute($cid);
     my ($count) = $sth2->fetchrow_array;
     if ($count == 1) {
@@ -1369,9 +1427,47 @@ sub types {
     my $self = shift;
     eval "require Bio::DB::GFF::Typename" 
 	unless Bio::DB::GFF::Typename->can('new');
-    my $typelist_table      = $self->_typelist_table;
+    my $typelist      = $self->_typelist_table;
     my $sql = <<END;
-SELECT tag from $typelist_table
+SELECT tag from $typelist
+END
+;
+    $self->_print_query($sql) if DEBUG || $self->debug;
+    my $sth = $self->_prepare($sql);
+    $sth->execute() or $self->throw($sth->errstr);
+
+    my @results;
+    while (my($tag) = $sth->fetchrow_array) {
+	push @results,Bio::DB::GFF::Typename->new($tag);
+    }
+    $sth->finish;
+    return @results;
+}
+
+=head2 toplevel_types
+
+ Title   : toplevel_types
+ Usage   : @type_list = $db->toplevel_types
+ Function: Get the toplevel types in the database
+ Returns : array of Bio::DB::GFF::Typename objects
+ Args    : none
+ Status  : public
+
+This is similar to types() but only returns the types of
+INDEXED (toplevel) features.
+
+=cut
+
+sub toplevel_types {
+    my $self = shift;
+    eval "require Bio::DB::GFF::Typename" 
+	unless Bio::DB::GFF::Typename->can('new');
+    my $typelist      = $self->_typelist_table;
+    my $features       = $self->_feature_table;
+    my $sql = <<END;
+SELECT distinct(tag) from $typelist as tl,$features as f
+ WHERE tl.id=f.typeid
+   AND f.indexed=1
 END
 ;
     $self->_print_query($sql) if DEBUG || $self->debug;
@@ -1393,9 +1489,9 @@ sub _insert_sequence {
   my $self = shift;
   my ($seqid,$seq,$offset) = @_;
   my $id = $self->_locationid($seqid);
-  my $seqtable = $self->_sequence_table;
+  my $sequence = $self->_sequence_table;
   my $sth = $self->_prepare(<<END);
-REPLACE INTO $seqtable (id,offset,sequence) VALUES (?,?,?)
+REPLACE INTO $sequence (id,offset,sequence) VALUES (?,?,?)
 END
   $sth->execute($id,$offset,$seq) or $self->throw($sth->errstr);
 }
@@ -1487,6 +1583,9 @@ sub _typeid {
 sub _locationid {
   shift->_genericid('locationlist','seqname',shift,1);
 }
+sub _locationid_nocreate {
+  shift->_genericid('locationlist','seqname',shift,0);
+}
 sub _attributeid {
   shift->_genericid('attributelist','tag',shift,1);
 }
@@ -1536,7 +1635,6 @@ sub bin_where {
   my $query = join ("\n\t OR ",@bins);
   return wantarray ? ($query,@args) : substitute($query,@args);
 }
-
 
 sub _delete_index {
   my $self = shift;
@@ -1684,18 +1782,19 @@ sub _prepare {
 # SQL Fragment generators
 ####################################################################################################
 
-sub _feature_table       {  shift->_qualify('feature')  }
-sub _location_table      {  shift->_qualify('location') }
-sub _locationlist_table  {  shift->_qualify('locationlist') }
-sub _type_table          {  shift->_qualify('feature')     }
-sub _typelist_table      {  shift->_qualify('typelist') }
-sub _name_table          {  shift->_qualify('name')     }
-sub _attribute_table     {  shift->_qualify('attribute')}
-sub _attributelist_table {  shift->_qualify('attributelist')}
-sub _parent2child_table  {  shift->_qualify('parent2child')}
-sub _meta_table          {  shift->_qualify('meta')}
-sub _update_table        {  shift->_qualify('update_table')}
-sub _sequence_table      {  shift->_qualify('sequence')}
+sub _attribute_table      {  shift->_qualify('attribute')      }
+sub _attributelist_table  {  shift->_qualify('attributelist')  }
+sub _feature_table        {  shift->_qualify('feature')        }
+sub _interval_stats_table {  shift->_qualify('interval_stats') }
+sub _location_table       {  shift->_qualify('location')       }
+sub _locationlist_table   {  shift->_qualify('locationlist')   }
+sub _meta_table           {  shift->_qualify('meta')           }
+sub _name_table           {  shift->_qualify('name')           }
+sub _parent2child_table   {  shift->_qualify('parent2child')   }
+sub _sequence_table       {  shift->_qualify('sequence')       }
+sub _type_table           {  shift->_qualify('feature')        }
+sub _typelist_table       {  shift->_qualify('typelist')       }
+sub _update_table         {  shift->_qualify('update_table')   }
 
 sub _make_attribute_where {
   my $self                     = shift;
@@ -1811,6 +1910,206 @@ sub _dump_update_attribute_index {
   }
 }
 
+sub coverage_array {
+    my $self = shift;
+    my ($seq_name,$start,$end,$types,$bins) = 
+	rearrange([['SEQID','SEQ_ID','REF'],'START',['STOP','END'],
+		   ['TYPES','TYPE','PRIMARY_TAG'],'BINS'],@_);
+
+    $bins  ||= 1000;
+    $start ||= 1;
+    unless ($end) {
+	my $segment = $self->segment($seq_name) or $self->throw("unknown seq_id $seq_name");
+	$end        = $segment->end;
+    }
+
+    my $binsize = ($end-$start+1)/$bins;
+    my $seqid   = $self->_locationid_nocreate($seq_name) || 0;
+
+    return [] unless $seqid;
+
+    # where each bin starts
+    my @his_bin_array = map {$start + $binsize * $_}       (0..$bins);
+    my @sum_bin_array = map {int(($_-1)/SUMMARY_BIN_SIZE)} @his_bin_array;
+
+    my $interval_stats    = $self->_interval_stats_table;
+    
+    # pick up the type ids
+    my ($from,$where,$group,@a) = $self->_types_sql($types,'b');
+    $where =~ s/.+AND//s;
+    my $sth = $self->_prepare(<<END);
+SELECT id,tag FROM $from
+WHERE  $where
+END
+;
+    my (@t,$report_tag);
+    $sth->execute(@a);
+    while (my ($t,$tag) = $sth->fetchrow_array) {
+	$report_tag ||= $tag;
+	push @t,$t;
+    }
+
+    my %bins;
+    my $sql = <<END;
+SELECT bin,cum_count
+  FROM $interval_stats
+  WHERE typeid=?
+    AND seqid=? AND bin >= ?
+  LIMIT 1
+END
+;
+    $sth = $self->_prepare($sql);
+
+    eval {
+	for my $typeid (@t) {
+
+	    for (my $i=0;$i<@sum_bin_array;$i++) {
+		
+		my @args = ($typeid,$seqid,$sum_bin_array[$i]);
+		$self->_print_query($sql,@args) if $self->debug;
+		
+		$sth->execute(@args) or $self->throw($sth->errstr);
+		my ($bin,$cum_count) = $sth->fetchrow_array;
+		push @{$bins{$typeid}},[$bin,$cum_count];
+	    }
+	}
+    };
+    return unless %bins;
+
+    my @merged_bins;
+    my $firstbin = int(($start-1)/$binsize);
+    for my $type (keys %bins) {
+	my $arry       = $bins{$type};
+	my $last_count = $arry->[0][1];
+	my $last_bin   = -1;
+	my $i          = 0;
+	my $delta;
+	for my $b (@$arry) {
+	    my ($bin,$count) = @$b;
+	    $delta              = $count - $last_count if $bin > $last_bin;
+	    $merged_bins[$i++]  = $delta;
+	    $last_count         = $count;
+	    $last_bin           = $bin;
+	}
+    }
+
+    return wantarray ? (\@merged_bins,$report_tag) : \@merged_bins;
+}
+
+sub build_summary_statistics {
+    my $self   = shift;
+    my $interval_stats = $self->_interval_stats_table;
+    my $dbh    = $self->dbh;
+    $dbh->begin_work;
+
+    my $sbs = SUMMARY_BIN_SIZE;
+    
+    my $result = eval {
+      $self->_add_interval_stats_table;
+      $self->_disable_keys($dbh,$interval_stats);
+      $dbh->do("DELETE FROM $interval_stats");
+      
+      my $insert = $dbh->prepare(<<END) or $self->throw($dbh->errstr);
+INSERT INTO $interval_stats
+           (typeid,seqid,bin,cum_count)
+    VALUES (?,?,?,?)
+END
+      
+	my $sql    = $self->_fetch_indexed_features_sql;
+	my $select = $dbh->prepare($sql) or $self->throw($dbh->errstr);
+
+	my $current_bin = -1;
+	my ($current_type,$current_seqid,$count);
+	my $cum_count = 0;
+	my (%residuals,$last_bin);
+
+	my $le = -t \*STDERR ? "\r" : "\n";
+
+	print STDERR "\n";
+	$select->execute;
+
+	while (my($typeid,$seqid,$start,$end) = $select->fetchrow_array) {
+	    print STDERR $count," features processed$le" if ++$count % 1000 == 0;
+
+	    my $bin = int($start/$sbs);
+	    $current_type  ||= $typeid;
+	    $current_seqid ||= $seqid;
+
+            # because the input is sorted by start, no more features will contribute to the 
+	    # current bin so we can dispose of it
+	    if ($bin != $current_bin) {
+		if ($seqid != $current_seqid or $typeid != $current_type) {
+		    # load all bins left over
+		    $self->_load_bins($insert,\%residuals,\$cum_count,$current_type,$current_seqid);
+		    %residuals = () ;
+		    $cum_count = 0;
+		} else {
+		    # load all up to current one
+		    $self->_load_bins($insert,\%residuals,\$cum_count,$current_type,$current_seqid,$current_bin); 
+		}
+	    }
+
+	    $last_bin = $current_bin;
+	    ($current_seqid,$current_type,$current_bin) = ($seqid,$typeid,$bin);
+
+	    # summarize across entire spanned region
+	    my $last_bin = int(($end-1)/$sbs);
+	    for (my $b=$bin;$b<=$last_bin;$b++) {
+		$residuals{$b}++;
+	    }
+	}
+	# handle tail case
+        # load all bins left over
+	$self->_load_bins($insert,\%residuals,\$cum_count,$current_type,$current_seqid);
+	$self->_enable_keys($dbh,$interval_stats);
+	1;
+    };
+	
+    if ($result) { $dbh->commit } else { warn "Can't build summary statistics: $@"; $dbh->rollback };
+    print STDERR "\n";
+}
+
+sub _load_bins {
+    my $self = shift;
+    my ($insert,$residuals,$cum_count,$type,$seqid,$stop_after) = @_;
+    for my $b (sort {$a<=>$b} keys %$residuals) {
+	last if defined $stop_after and $b > $stop_after;
+	$$cum_count += $residuals->{$b};
+	my @args    = ($type,$seqid,$b,$$cum_count);
+	$insert->execute(@args);
+	delete $residuals->{$b}; # no longer needed
+    }
+}
+
+sub _add_interval_stats_table {
+    my $self = shift;
+    my $tables          = $self->table_definitions;
+    my $interval_stats  = $self->_interval_stats_table;
+    $self->dbh->do("CREATE TABLE IF NOT EXISTS $interval_stats $tables->{interval_stats}");
+}
+
+sub _fetch_indexed_features_sql {
+    my $self     = shift;
+    my $features = $self->_feature_table;
+    return <<END;
+SELECT typeid,seqid,start-1,end
+  FROM $features as f
+ WHERE f.indexed=1
+  ORDER BY typeid,seqid,start
+END
+}
+
+sub _disable_keys {
+    my $self = shift;
+    my ($dbh,$table) = @_;
+    $dbh->do("ALTER TABLE $table DISABLE KEYS");
+}
+sub _enable_keys {
+    my $self = shift;
+    my ($dbh,$table) = @_;
+    $dbh->do("ALTER TABLE $table ENABLE KEYS");
+}
+
 sub time {
   return Time::HiRes::time() if Time::HiRes->can('time');
   return time();
@@ -1819,7 +2118,7 @@ sub time {
 sub DESTROY {
   my $self = shift;
   if ($self->{bulk_update_in_progress}) {  # be sure to remove temp files
-    for my $table ('feature',$self->index_tables) {
+    for my $table ($self->_feature_table,$self->index_tables) {
       my $path = $self->dump_path($table);
       unlink $path;
     }

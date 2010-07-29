@@ -7,7 +7,7 @@ BEGIN {
 	use lib '.';
     use Bio::Root::Test;
     
-    test_begin(-tests => 16);
+    test_begin(-tests => 18);
 	
 	use_ok('Bio::AlignIO::xmfa');
 }
@@ -24,6 +24,8 @@ $aln = $str->next_aln();
 isa_ok($aln,'Bio::Align::AlignI');
 is $aln->get_seq_by_pos(1)->get_nse, 'chrY/1-598', 
   "xmfa input test ";
+is $aln->get_seq_by_pos(1)->strand, 1, 
+  "xmfa strand test";
 is ($aln->get_seq_by_pos(2)->description, undef, 
     "xmfa input test for description");
 is ($aln->get_seq_by_pos(3)->display_id, 'chr7',
@@ -38,6 +40,8 @@ $aln = $str->next_aln();
 isa_ok($aln,'Bio::Align::AlignI');
 is $aln->get_seq_by_pos(1)->get_nse, 'chrY/1000-1059', 
   "xmfa input test ";
+is $aln->get_seq_by_pos(1)->strand, 1, 
+  "xmfa strand";
 is ($aln->get_seq_by_pos(2)->description, undef, 
     "xmfa input test for description");
 is ($aln->get_seq_by_pos(3)->display_id, 'chr12',

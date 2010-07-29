@@ -13,6 +13,40 @@ use strict;
 use lib '.';
 use Bio::Root::Build;
 
+# XML::SAX::RTF doesn't work with BioPerl, at all, nada, zilch.
+#
+# Since we're running into this now on CPAN Testers, catch it up front and
+# deal with it.
+#
+# See: https://rt.cpan.org/Ticket/Display.html?id=5943
+#      http://bugzilla.open-bio.org/show_bug.cgi?id=2975
+
+{
+
+eval {
+    require XML::SAX;
+    1;
+};
+
+unless ($@) {
+    if (grep {$_->{Name} =~ 'XML::SAX::RTF'} @{XML::SAX->parsers()}) {
+        warn <<WARN;
+############################# WARNING #############################
+
+XML::SAX::RTF is not XML::SAX-compliant but is registered as an
+XML::SAX parser.  If used as the primary parser, modules requiring
+XML::SAX will NOT work.  Please install another XML::SAX-compliant
+module and modify your local ParserDetails.ini file per XML::SAX docs
+to remove references to XML::SAX::RTF.
+
+############################# WARNING #############################
+WARN
+    sleep 3;
+    }
+}
+
+}
+
 our @drivers;
 
 my $mysql_ok = 0;
@@ -25,6 +59,7 @@ my $build = Bio::Root::Build->new(
     dist_author         => 'BioPerl Team <bioperl-l@bioperl.org>',
     dist_abstract       => 'Bioinformatics Toolkit',
     license             => 'perl',
+    no_index            => {'dir'                       => [qw(examples/root/lib)]},
     requires            => {
                             'perl'                      => '5.6.1',
                             'IO::String'                => 0,
@@ -47,11 +82,9 @@ my $build = Bio::Root::Build->new(
                             # the [circular dependency!] specifies it is only installed on explicit request for this specific module,
                             # not when simply choosing to install 'all' modules
                             'Bio::ASN1::EntrezGene'     => '0/parsing entrezgene/Bio::SeqIO::entrezgene [circular dependency!]',
-                            # we actually need 1.01 of Class::AutoClass, but unfortunately it is versioned as 1.0
                             'Clone'                     => '0/cloning objects/Bio::Tools::Primer3',
                             'Convert::Binary::C'        => '0/strider functionality/Bio::SeqIO::strider',
-                            # we specifically want Graph::Directed, but that has no VERSION
-                            'Graph'                     => '0/ontology engine implementation for the GO parser/Bio::PhyloNetwork',
+                            'Graph'                     => '0/Phylogenetic Networks, ontology engine implementation, contig analysis/Bio::PhyloNetwork,Bio::Ontology::SimpleGOEngine::GraphAdaptor,Bio::Assembly::Tools::ContigSpectrum',
                             'GraphViz'                  => '0/Phylogenetic Network Visulization/Bio::PhyloNetwork::GraphViz',
                             'HTML::Entities'            => '0/remote analysis POST submissions/Bio::SearchIO::blastxml',
                             'HTML::HeadParser'          => '3/parsing <HEAD> section of HTML docs/Bio::Tools::Analysis::DNA::ESEfinder',
@@ -62,8 +95,8 @@ my $build = Bio::Root::Build->new(
                             'PostScript::TextBlock'     => '0/EPS output/Bio::Tree::Draw::Cladogram',
                             'Set::Scalar'               => '0/proper operation/Bio::Tree::Compatible',
                             'SOAP::Lite'                => '0/Bibliographic queries/Bio::DB::Biblio::soap',
-                            'Spreadsheet::ParseExcel'   => '0/parsing Excel files/Bio::SeqIO::excel,Bio::Microarray::Tools::ReseqChip',
-                            'Spreadsheet::WriteExcel'   => '0/writing Excel files/Bio::Microarray::Tools::ReseqChip',
+                            'Sort::Naturally'           => '0/sort lexically, but sort numeral parts numerically/Bio::Assembly::IO::ace,Bio::Assembly::IO::tigr',
+                            'Spreadsheet::ParseExcel'   => '0/parsing Excel files/Bio::SeqIO::excel',
                             'Storable'                  => '2.05/storing sequence objects in local file cache/Bio::DB::FileCache,Bio::SeqFeature::Collection,Bio::PopGen::HtSNP,Bio::PopGen::TagHaplotype,Bio::DB::GFF::Adaptor::berkeleydb',
                             'SVG'                       => '2.26/creating SVG images/Bio::Draw::Pictogram',
                             'SVG::Graph'                => '0.01/creating SVG images/Bio::TreeIO::svggraph',

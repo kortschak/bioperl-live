@@ -314,7 +314,8 @@ sub get_nse{
    $char1 ||= "/";
    $char2 ||= "-";
    
-   my ($id, $st, $end)  = ($self->id(), $self->start(), $self->end());
+   my ($id, $st, $end, $strand)  = ($self->id(), $self->start(),
+                                    $self->end(), $self->strand || 0);
    
    if ($self->force_nse) {
         $id  ||= '';
@@ -326,9 +327,13 @@ sub get_nse{
    $self->throw("Attribute start not set") unless defined($st);
    $self->throw("Attribute end not set") unless defined($end);
    
+   if ($strand && $strand == -1) {
+      ($st, $end) = ($end, $st);
+   }
+   
    #Stockholm Rfam includes version if present so it is optional
-   my $v = $self->version ? '.'.$self->version : ''; 
-   return $id . $v. $char1 . $st . $char2 . $end ;
+   my $v = $self->version ? '.'.$self->version : '';
+   return join('',$id, $v, $char1, $st, $char2, $end);
 }
 
 =head2 force_nse

@@ -298,12 +298,21 @@ sub write_feature {
  Returns : value of fasta_mode (a scalar)
  Args    : on set, new value (a scalar or undef, optional)
 
+Side effect when setting: rewind the file handle a little bit to get the last
+carriage return that was swallowed when the previous line was processed.
 
 =cut
 
 sub fasta_mode {
   my($self,$val) = @_;
+
   $self->{'fasta_mode'} = $val if defined($val);
+
+  if ($val && $val == 1) {
+  #  seek $self->_fh(), -1, 1; #rewind 1 byte to get the previous line's \n
+    $self->_pushback("\n");
+  }
+
   return $self->{'fasta_mode'};
 }
 
@@ -900,7 +909,7 @@ sub _write_feature_3 {
   my $max    = $feature->end     || '.';
   my $strand = $feature->strand == 1 ? '+' : $feature->strand == -1 ? '-' : '.';
   my $score  = defined($feature->score) ? (ref($feature->score) ? $feature->score->value : $feature->score) : undef;
-  my $phase  = $feature->phase->value;
+  my $phase  = defined($feature->phase) ? (ref($feature->phase) ? $feature->phase->value : $feature->phase) : undef;
 
   my @attr;
   if(my @v = ($feature->get_Annotations('Name'))){

@@ -91,8 +91,6 @@ Internal methods are usually preceded with a _
 package Bio::Tree::TreeFunctionsI;
 use strict;
 
-use UNIVERSAL qw(isa);
-
 use base qw(Bio::Tree::TreeI);
 
 =head2 find_node
@@ -715,37 +713,6 @@ sub simplify_to_leaves_string {
     return join(',', @data);
 }
 
-# safe tree clone that doesn't seg fault
-
-=head2 clone()
-
- Title   : clone
- Alias   : _clone
- Usage   : $tree_copy = $tree->clone();
-           $subtree_copy = $tree->clone($internal_node);
- Function: Safe tree clone that doesn't segfault
-           (of Sendu)
- Returns : Bio::Tree::Tree object
- Args    : [optional] $start_node, Bio::Tree::Node object
-
-=cut
-
-sub clone {
-    my ($self, $parent, $parent_clone) = @_;
-    $parent ||= $self->get_root_node;
-    $parent_clone ||= $self->_clone_node($parent);
-
-    foreach my $node ($parent->each_Descendent()) {
-        my $child = $self->_clone_node($node);
-        $child->ancestor($parent_clone);
-        $self->_clone($node, $child);
-    }
-    $parent->ancestor && return;
-
-    my $tree = $self->new(-root => $parent_clone);
-    return $tree;
-}
-
 # alias
 sub _clone { shift->clone(@_) }
 
@@ -798,6 +765,7 @@ sub _simplify_helper {
  Function: returns the distance between two given nodes
  Returns : numerical distance
  Args    : -nodes => arrayref of nodes to test
+           or ($node1, $node2)
 
 =cut
 
@@ -805,7 +773,17 @@ sub distance {
     my ($self,@args) = @_;
     my ($nodes) = $self->_rearrange([qw(NODES)],@args);
     if( ! defined $nodes ) {
-	$self->warn("Must supply -nodes parameter to distance() method");
+	$self->warn("Must supply two nodes or -nodes parameter to distance() method");
+	return;
+    }
+    elsif (ref($nodes) eq 'ARRAY') {
+	1;
+    }
+    elsif ( @args == 2) { # assume these are nodes...
+	    $nodes = \@args;
+    }
+    else {
+	$self->warn("Must supply two nodes or -nodes parameter to distance() method");
 	return;
     }
     $self->throw("Must provide 2 nodes") unless @{$nodes} == 2;
@@ -1083,16 +1061,18 @@ sub move_id_to_bootstrap{
 }
 
 
-=head2 add_traits
+=head2 add_trait
 
-  Example    : $key = $stat->add_traits($tree, $trait_file, 3);
+  Example    : $key = $tree->add_trait($trait_file, 3);
   Description: Add traits to a Bio::Tree:Tree nodes
                of a tree from a file.
   Returns    : trait name
   Exceptions : log an error if a node has no value in the file
+  Args       : name of trait file (scalar string), 
+               index of trait file column (scalar int)
   Caller     : main()
 
-The trait file is a tab-delimied text file and need to have a header
+The trait file is a tab-delimited text file and needs to have a header
 line giving names to traits. The first column contains the leaf node
 ids. Subsequent columns contain different trait value sets. Columns
 numbering starts from 0. The default trait column is the second

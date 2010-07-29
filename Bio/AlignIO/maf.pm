@@ -170,11 +170,13 @@ sub next_aln {
 	    split /\s+/, $sline;
 	# adjust coordinates to be one-based inclusive
         $start = $start + 1;
-	my $seq = Bio::LocatableSeq->new('-seq'    => $text,
-					'-id'     => $src,
-					'-start'  => $start,
-					'-end'    => $start + $size - 1,
-					'-strand' => $strand,
+    $strand = $strand eq '+' ? 1 : $strand eq '-' ? -1 : 0;
+	my $seq = Bio::LocatableSeq->new('-seq'          => $text,
+					 '-display_id'   => $src,
+					 '-start'        => $start,
+					 '-end'          => $start + $size - 1,
+					 '-strand'       => $strand,
+					 '-alphabet'     => $self->alphabet,
 					);
 	$aln->add_seq($seq);
     }

@@ -176,8 +176,18 @@ sub next_aln {
 	@names,$seqname,$start,$end,$count,$seq);
 
     my $aln =  Bio::SimpleAlign->new(-source => 'phylip');
-    $entry = $self->_readline and
-        ($seqcount, $residuecount) = $entry =~ /\s*(\d+)\s+(\d+)/;
+
+    # skip blank lines until we see header line
+    # if we see a non-blank line that isn't the seqcount and residuecount line
+    # then bail out of next_aln (return)
+    HEADER: while ($entry = $self->_readline) {
+        next if $entry =~ /^\s?$/; 
+        if ($entry =~ /\s*(\d+)\s+(\d+)/) {
+            ($seqcount, $residuecount) = ($1, $2);
+
+        }
+        last HEADER;
+    }
     return unless $seqcount and $residuecount;
 
     # first alignment section
@@ -188,6 +198,7 @@ sub next_aln {
     while( $entry = $self->_readline) {
 	last if( $entry =~ /^\s?$/ && $interleaved );
 
+    # we've hit the next entry.
 	if( $entry =~ /^\s+(\d+)\s+(\d+)\s*$/) {
 	    $self->_pushback($entry);
 	    last;
@@ -286,11 +297,12 @@ sub next_aln {
 	$self->throw("Length of sequence [$seqname] is not [$residuecount] it is ".CORE::length($hash{$count})."! ")
 	    unless CORE::length($hash{$count}) == $residuecount;
 
-       $seq = Bio::LocatableSeq->new('-seq'=>$hash{$count},
-				    '-id'=>$seqname,
-				    '-start'=>$start,
-				    '-end'=>$end,
-				   );
+	$seq = Bio::LocatableSeq->new('-seq'           => $hash{$count},
+				      '-display_id'    => $seqname,
+				      '-start'         => $start,
+				      '-end'           => $end,
+				      '-alphabet'      => $self->alphabet,
+				      );
 	$aln->add_seq($seq);
 
    }
@@ -303,7 +315,7 @@ sub next_aln {
 
  Title   : write_aln
  Usage   : $stream->write_aln(@aln)
- Function: writes the $aln object into the stream in MSF format
+ Function: writes the $aln object into the stream in phylip format
  Returns : 1 for success and 0 for error
  Args    : L<Bio::Align::AlignI> object
 

@@ -220,6 +220,12 @@ sub new {
     # when the sequence is set
     $alphabet && $self->alphabet($alphabet);
 
+    # bernd's idea: define ids so that invalid sequence messages
+    # can be more informative...
+    defined $id  && $self->display_id($id);
+    $acc         && $self->accession_number($acc);
+    defined $pid && $self->primary_id($pid);
+
     # if there is an alphabet, and direct is passed in, assume the alphabet
     # and sequence is ok
     
@@ -234,9 +240,6 @@ sub new {
 		 $self->seq($seq) if defined($seq);
 	 }
 
-    defined $id  && $self->display_id($id);
-    $acc         && $self->accession_number($acc);
-    defined $pid && $self->primary_id($pid);
     $desc        && $self->desc($desc);
     $description && $self->description($description);
     $is_circular && $self->is_circular($is_circular);
@@ -281,7 +284,7 @@ sub seq {
 
    if(@args) {
        if(defined($value) && (! $obj->validate_seq($value))) {
-	   $obj->throw("Attempting to set the sequence to [$value] ".
+	   $obj->throw("Attempting to set the sequence '".(defined($obj->id) || "[unidentified sequence]")."' to [$value] ".
 							"which does not look healthy");
 		}
        # if a sequence was already set we make sure that we re-adjust the
@@ -337,7 +340,7 @@ sub validate_seq {
 	return 0 unless( defined $seqstr);
 	if((CORE::length($seqstr) > 0) &&
 	   ($seqstr !~ /^([$MATCHPATTERN]+)$/)) {
-	    $self->warn("seq doesn't validate, mismatch is " .
+	    $self->warn("sequence '".(defined($self->id) || "[unidentified sequence]")."' doesn't validate, mismatch is " .
 			join(",",($seqstr =~ /([^$MATCHPATTERN]+)/g)));
 		return 0;
 	}
@@ -398,14 +401,24 @@ sub subseq {
        if( $start <= 0 ) {
 	   $self->throw("Bad start parameter ($start). Start must be positive.");
        }
-       if( $end > $self->length ) {
-	   $self->throw("Bad end parameter ($end). End must be less than the total length of sequence (total=".$self->length.")");
-       }
 
        # remove one from start, and then length is end-start
        $start--;
        my @ss_args = map { eval "defined $_"  ? $_ : () } qw( $self->{seq} $start $end-$start $replace);
        my $seqstr = eval join( '', "substr(", join(',',@ss_args), ")");
+
+       if( $end > $self->length) {
+	   if ($self->is_circular) {
+	       my $start = 0;
+	       my $end = $end - $self->length;
+	       my @ss_args = map { eval "defined $_"  ? $_ : () } qw( $self->{seq} $start $end-$start $replace);
+	       my $appendstr = eval join( '', "substr(", join(',',@ss_args), ")");
+	       $seqstr .= $appendstr;
+	   } else {
+	       $self->throw("Bad end parameter ($end). End must be less than the total length of sequence (total=".$self->length.")")
+	   }
+       } 
+
        $seqstr =~ s/[$GAP_SYMBOLS]//g if ($nogap);
        return $seqstr;
 

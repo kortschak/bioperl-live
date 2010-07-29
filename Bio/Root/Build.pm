@@ -85,7 +85,7 @@ BEGIN {
 use strict;
 use warnings;
 
-our $VERSION = '1.006001';
+our $VERSION = '1.006900'; # pre-1.7
 our @extra_types = qw(options excludes_os feature_requires test); # test must always be last in the list!
 our $checking_types = "requires|conflicts|".join("|", @extra_types);
 
@@ -293,13 +293,17 @@ sub check_autofeatures {
     $self->log_info("\n");
 }
 
+# TODO: STDERR output redirect is causing some installations to fail, commenting
+# out until a fix is in place
+
 # overriden just to hide pointless ugly warnings
 sub check_installed_status {
     my $self = shift;
-    open (my $olderr, ">&", \*STDERR);
+    
+    open (my $olderr, ">&". fileno(STDERR));
     open(STDERR, "/dev/null");
     my $return = $self->SUPER::check_installed_status(@_);
-    open(STDERR, ">&", $olderr);
+    open(STDERR, ">&". fileno($olderr));
     return $return;
 }
 
@@ -1210,6 +1214,11 @@ sub prompt_for_network {
     if ($proceed) {
         $self->notes(network => 1);
         $self->log_info("  - will run internet-requiring tests\n");
+        my $use_email = $self->y_n("Do you want to run tests requiring a valid email address? y/n",'n');
+        if ($use_email) {
+            my $address = $self->prompt("Enter email address:");
+            $self->notes(email => $address);
+        }
     }
     else {
         $self->notes(network => 0);

@@ -28,9 +28,10 @@ Bio::Seq::RichSeqI - interface for sequences from rich data sources, mostly data
 
 =head1 DESCRIPTION
 
-This interface extends the Bio::SeqI interface to give additional functionality
-to sequences with richer data sources, in particular from database sequences 
-(EMBL, GenBank and Swissprot).
+This interface extends the L<Bio::SeqI> interface to give additional
+functionality to sequences with richer data sources, in particular from database
+sequences (EMBL, GenBank and Swissprot). For a general implementation, please
+see the documentation for L<Bio::Seq::RichSeq>.
 
 =head1 FEEDBACK
 
@@ -69,7 +70,8 @@ Email birney@ebi.ac.uk
 
 =head1 APPENDIX
 
-The rest of the documentation details each of the object methods. Internal methods are usually preceded with a _
+The rest of the documentation details each of the object methods. Internal
+methods are usually preceded with a _
 
 =cut
 
@@ -207,7 +209,10 @@ sub get_dates{
  Example :
  Returns : a string
  Args    :
-
+ Note    : this differs from Bio::PrimarySeq version() in that this explicitly
+           refers to the sequence record version one would find in a typical
+           sequence file.  It is up to the implementation whether this is set
+           separately or falls back to the more generic Bio::Seq::version()
 
 =cut
 

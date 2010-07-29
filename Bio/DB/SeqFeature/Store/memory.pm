@@ -156,6 +156,7 @@ sub post_init {
   my @argv;
   if (-d $file_or_dir) {
     @argv = (
+	     bsd_glob("$file_or_dir/*.size*"),
 	     bsd_glob("$file_or_dir/*.gff"),            bsd_glob("$file_or_dir/*.gff3"),
 	     bsd_glob("$file_or_dir/*.gff.{gz,Z,bz2}"), bsd_glob("$file_or_dir/*.gff3.{gz,Z,bz2}")
 	     );
@@ -164,17 +165,20 @@ sub post_init {
   }
   local $self->{file_or_dir} = $file_or_dir;
   $loader->load(@argv);
+  warn $@ if $@;
 }
 
 sub commit { # reindex fasta files
   my $self = shift;
 
+  my $db;
   if (my $fh = $self->{fasta_fh}) {
       $fh->close;
-      $self->{fasta_db} = Bio::DB::Fasta->new($self->{fasta_file});
+      $db = Bio::DB::Fasta->new($self->{fasta_file});
   } elsif (exists $self->{file_or_dir} && -d $self->{file_or_dir}) {
-      $self->{fasta_db} = Bio::DB::Fasta->new($self->{file_or_dir});
+      $db = Bio::DB::Fasta->new($self->{file_or_dir});
   }
+  $self->{fasta_db} = $db if $db;
 }
 
 sub can_store_parentage { 1 }
@@ -444,7 +448,7 @@ sub filter_by_location {
   if (!defined $start or !defined $end or $range_type eq 'contained_in') {
     @bins = sort {$a<=>$b} keys %{$index};
     $start = $bins[0]  * BINSIZE  unless defined $start;
-    $end   = @bins == 1 ? BINSIZE : $bins[-1] * BINSIZE  unless defined $end;
+    $end   = (($bins[-1] + 1) * BINSIZE) - 1 unless defined $end;
   }
   my %seenit;
   my $bin_min       = int $start/BINSIZE;
@@ -611,6 +615,49 @@ sub private_fasta_file {
   my $dir = tempdir (CLEANUP => 1);
   $self->{fasta_file}   = "$dir/sequence.$$.fasta";
   return $self->{fasta_fh} = IO::File->new($self->{fasta_file},">");
+}
+
+# summary support
+sub coverage_array {
+    my $self = shift;
+
+    my ($seq_name,$start,$end,$types,$bins) = 
+	rearrange([['SEQID','SEQ_ID','REF'],'START',['STOP','END'],
+		   ['TYPES','TYPE','PRIMARY_TAG'],'BINS'],@_);
+
+    my @features = $self->_features(-seq_id=> $seq_name,
+				    -start => $start,
+				    -end   => $end,
+				    -types => $types);
+
+    my $binsize = ($end-$start+1)/$bins;
+    my $report_tag;
+    my @coverage_array = (0) x $bins;
+    
+    for my $f (@features) {
+	$report_tag ||= $f->primary_tag;
+	my $fs        = $f->start;
+	my $fe        = $f->end;
+	my $start_bin = int(($fs-$start)/$binsize);
+	my $end_bin   = int(($fe-$start)/$binsize);
+	$start_bin    = 0       if $start_bin < 0;
+	$end_bin      = $bins-1 if $end_bin  >= $bins;
+	$coverage_array[$_]++ for ($start_bin..$end_bin);
+    }
+    return wantarray ? (\@coverage_array,$report_tag) : \@coverage_array;
+}
+
+sub _seq_ids {
+    my $self = shift;
+
+    if (my $fa = $self->{fasta_db}) {
+	if (my @s = eval {$fa->ids}) {
+	    return @s;
+	}
+    } 
+    
+    my $l    = $self->{_index}{location} or return;
+    return keys %$l;
 }
 
 package Bio::DB::SeqFeature::Store::memory::Iterator;

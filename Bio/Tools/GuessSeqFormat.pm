@@ -90,6 +90,10 @@ FastA sequence ("fasta")
 
 =item *
 
+FastQ sequence ("fastq")
+
+=item *
+
 FastXY/FastA alignment ("fastxy")
 
 =item *
@@ -228,6 +232,7 @@ Andreas Kähäri, andreas.kahari@ebi.ac.uk
 =head1 CONTRIBUTORS
 
 Heikki Lehväslaiho, heikki-at-bioperl-dot-org
+Mark A. Jensen, maj-at-fortinbras-dot-us
 
 =cut
 
@@ -406,10 +411,12 @@ sub text
 our %formats = (
     ace         => { test => \&_possibly_ace        },
     blast       => { test => \&_possibly_blast      },
+    bowtie      => { test => \&_possibly_bowtie     },
     clustalw    => { test => \&_possibly_clustalw   },
     codata      => { test => \&_possibly_codata     },
     embl        => { test => \&_possibly_embl       },
     fasta       => { test => \&_possibly_fasta      },
+    fastq       => { test => \&_possibly_fastq      },
     fastxy      => { test => \&_possibly_fastxy     },
     game        => { test => \&_possibly_game       },
     gcg         => { test => \&_possibly_gcg        },
@@ -547,6 +554,19 @@ sub _possibly_blast
         $line =~ /^[[:upper:]]*BLAST[[:upper:]]*.*\[.*\]$/);
 }
 
+=head2 _possibly_bowtie
+
+Contributed by kortsch.
+
+=cut
+
+sub _possibly_bowtie
+{
+    my ($line, $lineno) = (shift, shift);
+    return ($line =~ /^[[:graph:]]+\t[-+]\t[[:graph:]]+\t\d+\t([[:alpha:]]+)\t([[:graph:]]+)\t\d+\t[[:graph:]]?/)
+            && length($1)==length($2);
+}
+
 =head2 _possibly_clustalw
 
 From "http://www.ebi.ac.uk/help/formats.html".
@@ -597,6 +617,19 @@ sub _possibly_fasta
     my ($line, $lineno) = (shift, shift);
     return (($lineno != 1 && $line =~ /^[A-IK-NP-Z]+$/i) ||
             $line =~ /^>\s*\w/);
+}
+
+=head2 _possibly_fastq
+
+From bioperl test data.
+
+=cut
+
+sub _possibly_fastq
+{
+    my ($line, $lineno) = (shift, shift);
+    return ( ($lineno == 1 && $line =~ /^@/) ||
+	     ($lineno == 3 && $line =~ /^\+/) );
 }
 
 =head2 _possibly_fastxy
@@ -867,7 +900,7 @@ From "http://www.ebi.ac.uk/help/formats.html".
 sub _possibly_raw
 {
     my ($line, $lineno) = (shift, shift);
-    return ($line =~ /^(?:[sA-IK-NP-Z]+|[sa-ik-np-z]+)$/);
+    return ($line =~ /^[A-Za-z\s]+$/);
 }
 
 =head2 _possibly_rsf
@@ -941,5 +974,6 @@ sub _possibly_tab
     my ($line, $lineno) = (shift, shift);
     return ($lineno == 1 && $line =~ /^[^\t]+\t[^\t]+/) ;
 }
+
 
 1;

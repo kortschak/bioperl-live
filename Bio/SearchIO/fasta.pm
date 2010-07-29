@@ -173,7 +173,7 @@ use base qw(Bio::SearchIO);
  Function: Builds a new Bio::SearchIO::fasta object 
  Returns : Bio::SearchIO::fasta
  Args    : -idlength - set ID length to something other 
-                       than the default (7), this is only
+                       than the default (6), this is only
                        necessary if you have compiled FASTA
                        with a new default id length to display
                        in the HSP alignment blocks
@@ -244,8 +244,16 @@ sub next_result {
                     'Data' => $self->{'_reporttype'}
                 }
             );
-            $_ = $self->_readline();
-            my ($version) = (/version\s+(\S+)/);
+            my $version;
+            # version 35 version string on same line
+            if (/version/) {
+                ($version) = (/version\s+(\S+)/);
+            }
+            # earlier versions, it's on the next line
+            else {
+                $_ = $self->_readline();
+                ($version) = (/version\s+(\S+)/);
+            }
             $version = '' unless defined $version;
             $self->{'_version'} = $version;
             $self->element(
@@ -542,6 +550,12 @@ sub next_result {
                     'Data' => $3
                 }
             );
+            $self->element(
+                {
+                    'Name' => 'FastaOutput_program',
+                    'Data' => $self->{'_reporttype'}
+                }
+            );
         }
         elsif (
 /(?:gap\-pen|open\/ext):\s+([\-\+]?\d+)\s*\/\s*([\-\+]?\d+).+width:\s+(\d+)/
@@ -623,7 +637,7 @@ sub next_result {
             $_ = $self->_readline();
             my ( $score, $bits, $e ) = /Z-score: \s* (\S+) \s*
                                (?: bits: \s* (\S+) \s+ )?
-                               (?: E|expect ) \s* \(\) :? \s*(\S+)/ox;
+                               (?: E|expect ) \s* \((?:\d+)?\) :? \s*(\S+)/ox;
             $bits = $score unless defined $bits;
 
             my $v = shift @hit_signifs;
@@ -1328,6 +1342,12 @@ sub next_result {
                         $count = 5;
 
                         # going to skip these
+                    }
+                    elsif ( /\s+\S+fasta3\d\s+/) {
+                        # this is something that looks like a path but contains
+                        # the fasta3x executable string, such as:
+                        # /usr/local/fasta3/bin/fasta35 -n -U -Q -H -A -E 2.0 -C 19 -m 0 -m 9i test.fa ../other_mirs.fa -O test.fasta35
+                        last;
                     }
                     else {
                         $self->throw(

@@ -5,9 +5,10 @@ use strict;
 
 BEGIN {
 	use lib '.';
+	use lib '../..';
 	use Bio::Root::Test;
 	
-	test_begin(-tests => 69);
+	test_begin(-tests => 85);
 	
     use_ok('Bio::SeqIO::embl');
 }
@@ -189,3 +190,30 @@ is($cds_dblink->tagname, 'dblink', 'CDS - OX tagname');
 is($cds_dblink->database, 'NCBI_TaxID', 'CDS - OX database');
 is($cds_dblink->primary_id, '9606', 'CDS - OX primary_id');
 
+#bug 2982 - parsing contig descriptions sans sequence data
+
+ok( $embl = Bio::SeqIO->new(-file => test_input_file('bug2982.embl'),
+			    -format => 'embl') );
+my $i;
+for ($i=0; my $seq = $embl->next_seq; $i++) {
+    ok !$seq->seq;
+    ok ( my $ann = ($seq->annotation->get_Annotations('contig'))[0] );
+    like $ann->value, qr/join\(/;
+}
+is $i, 4;
+
+
+# bug 3086 - parsing long lines correctly
+
+ok( $embl = Bio::SeqIO->new(-file => test_input_file('bug3086.embl'),
+                            -format => 'embl',
+                            -verbose => '$verbose') );
+$seq = $embl->next_seq;
+foreach my $feature ($seq->top_SeqFeatures) {
+    if ($feature->has_tag('product')) {
+        my ($product) = $feature->get_tag_values('product');
+        is($product,
+           'bifunctional phosphoribosylaminoimidazolecarboxamide formyltransferase/IMP cyclohydrolase',
+           'Check if product was parsed correctly');
+    }
+}
